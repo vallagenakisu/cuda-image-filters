@@ -1,0 +1,28 @@
+# Build output
+build/
+bin/
+obj/
+*.o
+*.obj
+*.exe
+*.out
+
+# Generated / result images
+out/
+results/
+*.ppm
+assets/*.png
+!assets/.gitkeep
+
+# Editors & OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+compile_commands.json
