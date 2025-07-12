@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <string>
 
+#include "conv_kernel.hpp"
+#include "cpu_reference.hpp"
 #include "cuda_entry.hpp"
 #include "gpu_filters.hpp"
 #include "image.hpp"
@@ -44,20 +46,30 @@ int main(int argc, char** argv) {
     }
 
     cif::Image output;
-    switch (opt.filter) {
-        case cif::Filter::Passthrough:
-            output = input;
-            break;
-        case cif::Filter::Grayscale: {
-            cif::require_cuda_device();
-            const cif::Timings t = cif::gpu::grayscale(input, output, opt);
-            if (!opt.quiet) report(t);
-            break;
-        }
-        default:
-            std::fprintf(stderr, "error: filter '%s' is not wired up yet\n",
-                         cif::filter_name(opt.filter));
+    if (opt.backend == cif::Backend::Cpu) {
+        // The reference path needs no GPU at all, which is what makes it
+        // usable as the oracle and usable on a machine without CUDA.
+        if (!cif::cpu::run(input, output, opt, error)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
             return 3;
+        }
+        if (!opt.quiet) std::printf("cpu     reference backend\n");
+    } else {
+        switch (opt.filter) {
+            case cif::Filter::Passthrough:
+                output = input;
+                break;
+            case cif::Filter::Grayscale: {
+                cif::require_cuda_device();
+                const cif::Timings t = cif::gpu::grayscale(input, output, opt);
+                if (!opt.quiet) report(t);
+                break;
+            }
+            default:
+                std::fprintf(stderr, "error: filter '%s' has no CUDA path yet (try --backend cpu)\n",
+                             cif::filter_name(opt.filter));
+                return 3;
+        }
     }
 
     if (!cif::save_image(opt.output, output, error)) {
