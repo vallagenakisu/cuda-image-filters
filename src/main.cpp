@@ -12,8 +12,8 @@
 namespace {
 
 void report(const cif::Timings& t) {
-    std::printf("gpu     upload %.3f ms | kernel %.3f ms | download %.3f ms | total %.3f ms\n",
-                t.upload_ms, t.kernel_ms, t.download_ms, t.total_ms());
+    std::printf("gpu     %-9s upload %.3f ms | kernel %.3f ms | download %.3f ms | total %.3f ms\n",
+                t.method, t.upload_ms, t.kernel_ms, t.download_ms, t.total_ms());
 }
 
 }  // namespace
@@ -55,14 +55,25 @@ int main(int argc, char** argv) {
         }
         if (!opt.quiet) std::printf("cpu     reference backend\n");
     } else {
+        cif::require_cuda_device();
+        cif::Timings t;
         switch (opt.filter) {
-            case cif::Filter::Passthrough:
-                output = input;
+            case cif::Filter::Grayscale:
+                t = cif::gpu::grayscale(input, output, opt);
                 break;
-            case cif::Filter::Grayscale: {
-                cif::require_cuda_device();
-                const cif::Timings t = cif::gpu::grayscale(input, output, opt);
-                if (!opt.quiet) report(t);
+            case cif::Filter::Passthrough:
+            case cif::Filter::Box:
+            case cif::Filter::Gaussian:
+            case cif::Filter::Sharpen:
+            case cif::Filter::Emboss:
+            case cif::Filter::Laplacian: {
+                cif::ConvKernel kernel;
+                if (!cif::build_kernel(opt, kernel, error)) {
+                    std::fprintf(stderr, "error: %s\n", error.c_str());
+                    return 3;
+                }
+                if (!opt.quiet) std::printf("kernel  %s\n", kernel.describe().c_str());
+                t = cif::gpu::convolve(input, output, kernel, opt);
                 break;
             }
             default:
@@ -70,6 +81,7 @@ int main(int argc, char** argv) {
                              cif::filter_name(opt.filter));
                 return 3;
         }
+        if (!opt.quiet) report(t);
     }
 
     if (!cif::save_image(opt.output, output, error)) {
