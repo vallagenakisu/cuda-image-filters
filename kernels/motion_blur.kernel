@@ -1,0 +1,14 @@
+# 9x9 diagonal motion blur: only the leading diagonal is non-zero, so the
+# image smears along one direction instead of spreading evenly.
+name motion-blur-diagonal
+normalize 1
+
+1 0 0 0 0 0 0 0 0
+0 1 0 0 0 0 0 0 0
+0 0 1 0 0 0 0 0 0
+0 0 0 1 0 0 0 0 0
+0 0 0 0 1 0 0 0 0
+0 0 0 0 0 1 0 0 0
+0 0 0 0 0 0 1 0 0
+0 0 0 0 0 0 0 1 0
+0 0 0 0 0 0 0 0 1

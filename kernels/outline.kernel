@@ -1,0 +1,7 @@
+# All eight neighbours against the centre. Sums to zero, so flat regions go
+# black and only edges survive. Stronger and more isotropic than a Laplacian.
+name outline
+
+-1 -1 -1
+-1  8 -1
+-1 -1 -1

@@ -1,0 +1,8 @@
+# Horizontal gradient only - one half of what --filter sobel computes.
+# Bias 128 so negative gradients are visible rather than clipped to black.
+name sobel-x
+bias 128
+
+-1 0 1
+-2 0 2
+-1 0 1

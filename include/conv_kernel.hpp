@@ -51,6 +51,19 @@ ConvKernel make_emboss();
 ConvKernel make_laplacian();
 ConvKernel make_identity();
 
+// Read a matrix from a .kernel text file. The format is deliberately forgiving:
+//
+//   # comments run to end of line
+//   name    outline        optional, only used in log output
+//   bias    128            optional, added after the weighted sum
+//   normalize 1            optional, divide by the sum of the weights
+//   -1 -1 -1               the matrix itself: any whitespace, any line breaks,
+//   -1  8 -1               as long as the count is an odd perfect square
+//   -1 -1 -1
+//
+// Returns false with an explanation rather than throwing.
+bool load_kernel_file(const std::string& path, ConvKernel& out, std::string& error);
+
 // Pick and build the matrix implied by the options. Returns false with an
 // explanation for filters that are not convolutions at all (grayscale, sobel,
 // tonemap, invert).

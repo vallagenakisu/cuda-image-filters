@@ -2,6 +2,9 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 namespace cif {
 namespace {
@@ -121,6 +124,103 @@ ConvKernel make_identity() {
     return make_3x3("identity", w, 0.0f);
 }
 
+bool load_kernel_file(const std::string& path, ConvKernel& out, std::string& error) {
+    std::ifstream file(path);
+    if (!file) {
+        error = "could not open kernel file '" + path + "'";
+        return false;
+    }
+
+    ConvKernel k;
+    k.name = "custom";
+    bool normalize = false;
+    std::vector<float> values;
+
+    std::string line;
+    int line_number = 0;
+    while (std::getline(file, line)) {
+        ++line_number;
+
+        // Strip comments first so a '#' can follow real content on a line.
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+
+        std::istringstream tokens(line);
+        std::string token;
+        while (tokens >> token) {
+            if (token == "name") {
+                if (!(tokens >> k.name)) {
+                    error = path + ":" + std::to_string(line_number) + ": 'name' needs a value";
+                    return false;
+                }
+            } else if (token == "bias") {
+                if (!(tokens >> k.bias)) {
+                    error = path + ":" + std::to_string(line_number) + ": 'bias' needs a number";
+                    return false;
+                }
+            } else if (token == "normalize") {
+                std::string flag;
+                if (!(tokens >> flag)) {
+                    error = path + ":" + std::to_string(line_number) + ": 'normalize' needs 0 or 1";
+                    return false;
+                }
+                normalize = (flag == "1" || flag == "true" || flag == "yes");
+            } else {
+                // Anything else has to be a weight.
+                char* end = nullptr;
+                const float value = std::strtof(token.c_str(), &end);
+                if (end == token.c_str() || *end != '\0') {
+                    error = path + ":" + std::to_string(line_number) + ": '" + token +
+                            "' is neither a directive nor a number";
+                    return false;
+                }
+                values.push_back(value);
+            }
+        }
+    }
+
+    if (values.empty()) {
+        error = path + ": no weights found";
+        return false;
+    }
+
+    // The matrix has to be square with an odd side, otherwise there is no
+    // single centre tap to align with the pixel being written.
+    const int side = static_cast<int>(std::lround(std::sqrt(static_cast<double>(values.size()))));
+    if (static_cast<size_t>(side) * side != values.size()) {
+        error = path + ": " + std::to_string(values.size()) +
+                " weights do not form a square matrix";
+        return false;
+    }
+    if (side % 2 == 0) {
+        error = path + ": matrix is " + std::to_string(side) + "x" + std::to_string(side) +
+                ", but the side must be odd so there is a centre tap";
+        return false;
+    }
+
+    k.radius = (side - 1) / 2;
+    if (k.radius > kMaxKernelRadius) {
+        error = path + ": radius " + std::to_string(k.radius) + " exceeds the limit of " +
+                std::to_string(kMaxKernelRadius);
+        return false;
+    }
+    k.weights = values;
+
+    if (normalize) {
+        const float total = k.sum();
+        // A sum-zero matrix (an edge detector) cannot be normalised, and
+        // dividing by ~0 would blow the weights up.
+        if (std::fabs(total) < 1e-6f) {
+            error = path + ": normalize requested but the weights sum to zero";
+            return false;
+        }
+        for (float& w : k.weights) w /= total;
+    }
+
+    out = k;
+    return true;
+}
+
 bool build_kernel(const Options& opt, ConvKernel& out, std::string& error) {
     if (opt.radius < 0 || opt.radius > kMaxKernelRadius) {
         error = "radius must be between 0 and " + std::to_string(kMaxKernelRadius);
@@ -128,6 +228,8 @@ bool build_kernel(const Options& opt, ConvKernel& out, std::string& error) {
     }
 
     switch (opt.filter) {
+        case Filter::Custom:
+            return load_kernel_file(opt.kernel_path, out, error);
         case Filter::Box:
             out = make_box(opt.radius);
             return true;

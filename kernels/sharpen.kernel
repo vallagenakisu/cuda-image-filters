@@ -1,0 +1,7 @@
+# Classic 3x3 sharpen: big positive centre, negative cross. Sums to 1, so the
+# overall brightness is unchanged.
+name sharpen
+
+ 0 -1  0
+-1  5 -1
+ 0 -1  0

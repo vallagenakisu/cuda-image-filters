@@ -1,0 +1,10 @@
+# 5x5 box blur. Every weight is 1 and normalize divides by the sum, which is
+# 25 - easier to read than writing 0.04 twenty-five times.
+name box5
+normalize 1
+
+1 1 1 1 1
+1 1 1 1 1
+1 1 1 1 1
+1 1 1 1 1
+1 1 1 1 1

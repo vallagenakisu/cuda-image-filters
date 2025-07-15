@@ -1,0 +1,6 @@
+# Does nothing. The sanity check: output must equal input exactly.
+name identity
+
+0 0 0
+0 1 0
+0 0 0

@@ -1,0 +1,8 @@
+# Directional relief, lit from the top left. Sums to zero, so the bias puts
+# flat areas at mid grey instead of black.
+name emboss
+bias 128
+
+-2 -1  0
+-1  0  1
+ 0  1  2
