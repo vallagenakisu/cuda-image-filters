@@ -60,24 +60,111 @@ __global__ void convolve_naive_kernel(const uint8_t* __restrict__ in,
     }
 }
 
+// Tiled version: the block cooperatively stages its input into shared memory
+// once, then every thread convolves out of that.
+//
+// The block writes blockDim.x by blockDim.y output pixels, but to do so it
+// needs a (blockDim.x + 2r) by (blockDim.y + 2r) window of input - the extra
+// ring is the "halo", the pixels the threads on the edge of the block reach
+// into and which are shared with the neighbouring blocks.
+//
+// With a 16x16 block and radius 4 that is a 24x24 tile: 576 loads to serve
+// 256 threads x 81 taps = 20736 reads. That ratio is the whole optimisation.
+//
+// The tile is float rather than uint8. It costs 4x the shared memory, but it
+// keeps the byte-to-float conversion out of the inner loop and avoids the
+// bank conflicts that byte-wide shared accesses produce.
+__global__ void convolve_tiled_kernel(const uint8_t* __restrict__ in,
+                                      uint8_t* __restrict__ out,
+                                      int width, int height, int channels,
+                                      int radius, float bias) {
+    extern __shared__ float s_tile[];
+
+    const int tile_w = static_cast<int>(blockDim.x) + 2 * radius;
+    const int tile_h = static_cast<int>(blockDim.y) + 2 * radius;
+
+    // Top-left corner of the tile in image space, halo included, so it starts
+    // `radius` pixels above and to the left of the block's output region.
+    const int origin_x = static_cast<int>(blockIdx.x * blockDim.x) - radius;
+    const int origin_y = static_cast<int>(blockIdx.y * blockDim.y) - radius;
+
+    const int max_x = width - 1;
+    const int max_y = height - 1;
+
+    // There are more tile cells than threads, so each thread loads several,
+    // striding by the block dimensions. Striding (rather than giving each
+    // thread a contiguous chunk) keeps consecutive threads on consecutive
+    // addresses, so these loads coalesce too.
+    for (int ty = threadIdx.y; ty < tile_h; ty += blockDim.y) {
+        const int sy = clamp_coord(origin_y + ty, max_y);
+        for (int tx = threadIdx.x; tx < tile_w; tx += blockDim.x) {
+            const int sx = clamp_coord(origin_x + tx, max_x);
+            const uint8_t* src = in + (static_cast<size_t>(sy) * width + sx) * channels;
+            float* dst = s_tile + (static_cast<size_t>(ty) * tile_w + tx) * channels;
+            for (int c = 0; c < channels; ++c) {
+                dst[c] = static_cast<float>(src[c]);
+            }
+        }
+    }
+
+    // Every thread must finish loading before any thread starts reading its
+    // neighbours' cells.
+    __syncthreads();
+
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Note this guard comes *after* __syncthreads(), not before. Returning
+    // early from the out-of-range threads would leave them sitting out a
+    // barrier the rest of the block is waiting on, which is undefined
+    // behaviour and in practice a hang. Those threads still had halo cells to
+    // load, too.
+    if (x >= width || y >= height) return;
+
+    const int ksize = 2 * radius + 1;
+    const size_t pixel = static_cast<size_t>(y) * width + x;
+
+    for (int c = 0; c < channels; ++c) {
+        if (is_alpha_channel(c, channels)) {
+            out[pixel * channels + c] = in[pixel * channels + c];
+            continue;
+        }
+
+        float acc = bias;
+        for (int ky = 0; ky < ksize; ++ky) {
+            // Tap (kx, ky) of the matrix corresponds to tile cell
+            // (threadIdx + k): the thread's own centre sits at
+            // threadIdx + radius, and the tap offset is k - radius.
+            const size_t row = (static_cast<size_t>(threadIdx.y) + ky) * tile_w;
+            for (int kx = 0; kx < ksize; ++kx) {
+                const float w = c_kernel[ky * ksize + kx];
+                acc += w * s_tile[(row + threadIdx.x + kx) * channels + c];
+            }
+        }
+        out[pixel * channels + c] = clamp_to_byte(acc);
+    }
+}
+
+// Shared memory the tiled kernel needs for one block.
+size_t tile_bytes(int block_x, int block_y, int radius, int channels) {
+    const size_t tile_w = static_cast<size_t>(block_x) + 2 * radius;
+    const size_t tile_h = static_cast<size_t>(block_y) + 2 * radius;
+    return tile_w * tile_h * static_cast<size_t>(channels) * sizeof(float);
+}
+
 }  // namespace
 
 bool tiling_fits(const Options& opt, int radius, int channels) {
-    // A block of block_x by block_y output pixels needs a tile of
-    // (block_x + 2r) by (block_y + 2r) input pixels, including the halo it
-    // shares with its neighbours.
-    const size_t tile_w = static_cast<size_t>(opt.block_x) + 2 * radius;
-    const size_t tile_h = static_cast<size_t>(opt.block_y) + 2 * radius;
-    const size_t bytes = tile_w * tile_h * static_cast<size_t>(channels) * sizeof(float);
+    const size_t bytes = tile_bytes(opt.block_x, opt.block_y, radius, channels);
 
     int device = 0;
     cudaDeviceProp prop{};
     if (cudaGetDevice(&device) != cudaSuccess) return false;
     if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) return false;
 
-    // Leave a little headroom rather than taking the whole budget: a block
-    // that claims every byte of shared memory limits occupancy to one block
-    // per SM, which usually costs more than the tiling saves.
+    // Leave headroom rather than taking the whole budget: a block that claims
+    // every byte of shared memory limits occupancy to one block per SM, which
+    // usually costs more than the tiling saves.
     return bytes <= prop.sharedMemPerBlock / 2;
 }
 
@@ -90,12 +177,27 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
 
     out = Image(in.width, in.height, in.channels);
 
+    // Decide which implementation to run before touching the device.
+    ConvMethod method = opt.method;
+    const bool fits = tiling_fits(opt, kernel.radius, in.channels);
+    if (method == ConvMethod::Auto) {
+        method = fits ? ConvMethod::Tiled : ConvMethod::Naive;
+    } else if (method == ConvMethod::Tiled && !fits) {
+        std::fprintf(stderr,
+                     "warning: a %dx%d tile for radius %d needs %zu KiB of shared memory,\n"
+                     "         which does not fit; falling back to the naive kernel\n",
+                     opt.block_x + 2 * kernel.radius, opt.block_y + 2 * kernel.radius,
+                     kernel.radius,
+                     tile_bytes(opt.block_x, opt.block_y, kernel.radius, in.channels) / 1024);
+        method = ConvMethod::Naive;
+    }
+
     DeviceBuffer<uint8_t> d_in(in.byte_size());
     DeviceBuffer<uint8_t> d_out(out.byte_size());
 
     GpuTimer timer;
     Timings t;
-    t.method = "naive";
+    t.method = method_name(method);
 
     timer.start();
     d_in.upload(in.data.data(), in.byte_size());
@@ -107,8 +209,17 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
                     ceil_div(in.height, static_cast<int>(block.y)));
 
     timer.start();
-    convolve_naive_kernel<<<grid, block>>>(d_in.get(), d_out.get(), in.width, in.height,
-                                           in.channels, kernel.radius, kernel.bias);
+    if (method == ConvMethod::Tiled) {
+        // Third launch parameter: dynamically sized shared memory, because the
+        // tile size depends on the radius, which is only known at runtime.
+        const size_t shmem = tile_bytes(opt.block_x, opt.block_y, kernel.radius, in.channels);
+        convolve_tiled_kernel<<<grid, block, shmem>>>(d_in.get(), d_out.get(), in.width,
+                                                      in.height, in.channels, kernel.radius,
+                                                      kernel.bias);
+    } else {
+        convolve_naive_kernel<<<grid, block>>>(d_in.get(), d_out.get(), in.width, in.height,
+                                               in.channels, kernel.radius, kernel.bias);
+    }
     t.kernel_ms = timer.stop();
     CUDA_CHECK_KERNEL();
 
