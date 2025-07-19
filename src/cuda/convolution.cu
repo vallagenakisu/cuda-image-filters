@@ -17,9 +17,18 @@ constexpr int kMaxTaps = (2 * kMaxKernelRadius + 1) * (2 * kMaxKernelRadius + 1)
 // the whole warp instead of 32 separate global loads.
 __constant__ float c_kernel[kMaxTaps];
 
+// The 1D taps used by the separable path, at most 65 of them.
+__constant__ float c_taps[2 * kMaxKernelRadius + 1];
+
 void upload_kernel(const ConvKernel& kernel) {
     CUDA_CHECK(cudaMemcpyToSymbol(c_kernel, kernel.weights.data(),
                                   kernel.weights.size() * sizeof(float)));
+    if (kernel.separable) {
+        // horizontal and vertical are the same vector for every kernel here
+        // (both blurs are symmetric), so one upload covers both passes.
+        CUDA_CHECK(cudaMemcpyToSymbol(c_taps, kernel.horizontal.data(),
+                                      kernel.horizontal.size() * sizeof(float)));
+    }
 }
 
 // Naive version: every tap is a separate global memory read.
@@ -145,6 +154,68 @@ __global__ void convolve_tiled_kernel(const uint8_t* __restrict__ in,
     }
 }
 
+// A separable kernel is the outer product of two 1D vectors, so convolving
+// with the row vector and then the column vector gives the same result as the
+// full matrix - but in 2*K taps per pixel instead of K*K. At radius 8 that is
+// 34 taps instead of 289.
+//
+// The intermediate stays in float rather than being written back to bytes:
+// quantising between the two passes would throw away most of the precision the
+// second pass needs, and it shows up as banding in a strong blur.
+__global__ void convolve_horizontal_kernel(const uint8_t* __restrict__ in,
+                                           float* __restrict__ mid,
+                                           int width, int height, int channels, int radius) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    const int ksize = 2 * radius + 1;
+    const int max_x = width - 1;
+    const size_t pixel = static_cast<size_t>(y) * width + x;
+    const size_t row = static_cast<size_t>(y) * width;
+
+    for (int c = 0; c < channels; ++c) {
+        if (is_alpha_channel(c, channels)) {
+            mid[pixel * channels + c] = static_cast<float>(in[pixel * channels + c]);
+            continue;
+        }
+        float acc = 0.0f;
+        for (int k = 0; k < ksize; ++k) {
+            const int sx = clamp_coord(x + k - radius, max_x);
+            acc += c_taps[k] * static_cast<float>(in[(row + sx) * channels + c]);
+        }
+        mid[pixel * channels + c] = acc;
+    }
+}
+
+__global__ void convolve_vertical_kernel(const float* __restrict__ mid,
+                                         uint8_t* __restrict__ out,
+                                         int width, int height, int channels, int radius,
+                                         float bias) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    const int ksize = 2 * radius + 1;
+    const int max_y = height - 1;
+    const size_t pixel = static_cast<size_t>(y) * width + x;
+
+    for (int c = 0; c < channels; ++c) {
+        if (is_alpha_channel(c, channels)) {
+            out[pixel * channels + c] = clamp_to_byte(mid[pixel * channels + c]);
+            continue;
+        }
+        // The bias belongs to the matrix as a whole, so it is added once here
+        // rather than in both passes.
+        float acc = bias;
+        for (int k = 0; k < ksize; ++k) {
+            const int sy = clamp_coord(y + k - radius, max_y);
+            acc += c_taps[k] * mid[(static_cast<size_t>(sy) * width + x) * channels + c];
+        }
+        out[pixel * channels + c] = clamp_to_byte(acc);
+    }
+}
+
 // Shared memory the tiled kernel needs for one block.
 size_t tile_bytes(int block_x, int block_y, int radius, int channels) {
     const size_t tile_w = static_cast<size_t>(block_x) + 2 * radius;
@@ -181,6 +252,19 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
     ConvMethod method = opt.method;
     const bool fits = tiling_fits(opt, kernel.radius, in.channels);
     if (method == ConvMethod::Auto) {
+        // Cheapest first: 2K taps beats K*K taps by more than tiling saves,
+        // so a separable matrix takes the two-pass path even though it does
+        // not use shared memory at all.
+        if (kernel.separable) {
+            method = ConvMethod::Separable;
+        } else {
+            method = fits ? ConvMethod::Tiled : ConvMethod::Naive;
+        }
+    } else if (method == ConvMethod::Separable && !kernel.separable) {
+        std::fprintf(stderr,
+                     "warning: '%s' is not a separable matrix, so it cannot be split into two\n"
+                     "         1D passes; falling back to %s\n",
+                     kernel.name.c_str(), fits ? "tiled" : "naive");
         method = fits ? ConvMethod::Tiled : ConvMethod::Naive;
     } else if (method == ConvMethod::Tiled && !fits) {
         std::fprintf(stderr,
@@ -208,8 +292,22 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
     const dim3 grid(ceil_div(in.width, static_cast<int>(block.x)),
                     ceil_div(in.height, static_cast<int>(block.y)));
 
+    // Only the separable path needs the float intermediate, so it is not
+    // allocated for the other two.
+    DeviceBuffer<float> d_mid;
+    if (method == ConvMethod::Separable) {
+        d_mid.allocate(in.pixel_count() * static_cast<size_t>(in.channels));
+    }
+
     timer.start();
-    if (method == ConvMethod::Tiled) {
+    if (method == ConvMethod::Separable) {
+        convolve_horizontal_kernel<<<grid, block>>>(d_in.get(), d_mid.get(), in.width, in.height,
+                                                    in.channels, kernel.radius);
+        // No explicit sync between the two: they are launched into the same
+        // stream, and a stream runs its work in order.
+        convolve_vertical_kernel<<<grid, block>>>(d_mid.get(), d_out.get(), in.width, in.height,
+                                                  in.channels, kernel.radius, kernel.bias);
+    } else if (method == ConvMethod::Tiled) {
         // Third launch parameter: dynamically sized shared memory, because the
         // tile size depends on the radius, which is only known at runtime.
         const size_t shmem = tile_bytes(opt.block_x, opt.block_y, kernel.radius, in.channels);
