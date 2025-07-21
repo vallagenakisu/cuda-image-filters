@@ -61,12 +61,22 @@ int main(int argc, char** argv) {
             case cif::Filter::Grayscale:
                 t = cif::gpu::grayscale(input, output, opt);
                 break;
+            case cif::Filter::Invert:
+                t = cif::gpu::invert(input, output, opt);
+                break;
+            case cif::Filter::Sobel:
+                t = cif::gpu::sobel(input, output, opt);
+                break;
+            case cif::Filter::Tonemap:
+                t = cif::gpu::tonemap(input, output, opt);
+                break;
             case cif::Filter::Passthrough:
             case cif::Filter::Box:
             case cif::Filter::Gaussian:
             case cif::Filter::Sharpen:
             case cif::Filter::Emboss:
-            case cif::Filter::Laplacian: {
+            case cif::Filter::Laplacian:
+            case cif::Filter::Custom: {
                 cif::ConvKernel kernel;
                 if (!cif::build_kernel(opt, kernel, error)) {
                     std::fprintf(stderr, "error: %s\n", error.c_str());
@@ -76,10 +86,6 @@ int main(int argc, char** argv) {
                 t = cif::gpu::convolve(input, output, kernel, opt);
                 break;
             }
-            default:
-                std::fprintf(stderr, "error: filter '%s' has no CUDA path yet (try --backend cpu)\n",
-                             cif::filter_name(opt.filter));
-                return 3;
         }
         if (!opt.quiet) report(t);
     }

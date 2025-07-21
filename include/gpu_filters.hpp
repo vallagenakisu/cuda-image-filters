@@ -35,5 +35,12 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
 // budget for a block. The host needs this to decide what Auto means.
 bool tiling_fits(const Options& opt, int radius, int channels);
 
+// Gradient magnitude. Always writes a single-channel image.
+Timings sobel(const Image& in, Image& out, const Options& opt);
+
+// Pointwise filters: one read and one write per pixel, nothing to cache.
+Timings invert(const Image& in, Image& out, const Options& opt);
+Timings tonemap(const Image& in, Image& out, const Options& opt);
+
 }  // namespace gpu
 }  // namespace cif
