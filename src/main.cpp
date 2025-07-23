@@ -8,8 +8,14 @@
 #include "image.hpp"
 #include "image_io.hpp"
 #include "options.hpp"
+#include "verify.hpp"
 
 namespace {
+
+// The separable path and powf accumulate in a different order from the
+// reference, which moves a handful of channel values by one. Anything larger
+// than that is an actual defect rather than float noise.
+constexpr long kVerifyTolerance = 1;
 
 void report(const cif::Timings& t) {
     std::printf("gpu     %-9s upload %.3f ms | kernel %.3f ms | download %.3f ms | total %.3f ms\n",
@@ -88,6 +94,19 @@ int main(int argc, char** argv) {
             }
         }
         if (!opt.quiet) report(t);
+
+        if (opt.verify) {
+            // Same input, same options, reference implementation. Anything
+            // beyond a rounding-sized difference is a bug in the kernel.
+            cif::Image reference;
+            if (!cif::cpu::run(input, reference, opt, error)) {
+                std::fprintf(stderr, "error: reference run failed: %s\n", error.c_str());
+                return 3;
+            }
+            const cif::DiffStats stats = cif::compare_images(output, reference);
+            cif::print_diff(stats, kVerifyTolerance);
+            if (!cif::diff_within(stats, kVerifyTolerance)) return 4;
+        }
     }
 
     if (!cif::save_image(opt.output, output, error)) {
