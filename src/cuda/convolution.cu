@@ -1,4 +1,7 @@
+#include <chrono>
+
 #include "conv_kernel.hpp"
+#include "cpu_reference.hpp"
 #include "cuda_utils.cuh"
 #include "gpu_filters.hpp"
 #include "pixel_ops.hpp"
@@ -223,6 +226,35 @@ size_t tile_bytes(int block_x, int block_y, int radius, int channels) {
     return tile_w * tile_h * static_cast<size_t>(channels) * sizeof(float);
 }
 
+// One place that knows how to launch each variant, so convolve() and the
+// benchmark cannot end up measuring different code from what they ship.
+void launch(ConvMethod method, dim3 grid, dim3 block, const Options& opt, const ConvKernel& kernel,
+            const uint8_t* d_in, uint8_t* d_out, float* d_mid, int width, int height,
+            int channels) {
+    switch (method) {
+        case ConvMethod::Separable:
+            convolve_horizontal_kernel<<<grid, block>>>(d_in, d_mid, width, height, channels,
+                                                        kernel.radius);
+            // No sync between the two: same stream, and a stream is ordered.
+            convolve_vertical_kernel<<<grid, block>>>(d_mid, d_out, width, height, channels,
+                                                      kernel.radius, kernel.bias);
+            break;
+        case ConvMethod::Tiled: {
+            // Third launch parameter: dynamic shared memory, because the tile
+            // size depends on a radius only known at runtime.
+            const size_t shmem = tile_bytes(opt.block_x, opt.block_y, kernel.radius, channels);
+            convolve_tiled_kernel<<<grid, block, shmem>>>(d_in, d_out, width, height, channels,
+                                                          kernel.radius, kernel.bias);
+            break;
+        }
+        case ConvMethod::Naive:
+        case ConvMethod::Auto:
+            convolve_naive_kernel<<<grid, block>>>(d_in, d_out, width, height, channels,
+                                                   kernel.radius, kernel.bias);
+            break;
+    }
+}
+
 }  // namespace
 
 bool tiling_fits(const Options& opt, int radius, int channels) {
@@ -300,24 +332,8 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
     }
 
     timer.start();
-    if (method == ConvMethod::Separable) {
-        convolve_horizontal_kernel<<<grid, block>>>(d_in.get(), d_mid.get(), in.width, in.height,
-                                                    in.channels, kernel.radius);
-        // No explicit sync between the two: they are launched into the same
-        // stream, and a stream runs its work in order.
-        convolve_vertical_kernel<<<grid, block>>>(d_mid.get(), d_out.get(), in.width, in.height,
-                                                  in.channels, kernel.radius, kernel.bias);
-    } else if (method == ConvMethod::Tiled) {
-        // Third launch parameter: dynamically sized shared memory, because the
-        // tile size depends on the radius, which is only known at runtime.
-        const size_t shmem = tile_bytes(opt.block_x, opt.block_y, kernel.radius, in.channels);
-        convolve_tiled_kernel<<<grid, block, shmem>>>(d_in.get(), d_out.get(), in.width,
-                                                      in.height, in.channels, kernel.radius,
-                                                      kernel.bias);
-    } else {
-        convolve_naive_kernel<<<grid, block>>>(d_in.get(), d_out.get(), in.width, in.height,
-                                               in.channels, kernel.radius, kernel.bias);
-    }
+    launch(method, grid, block, opt, kernel, d_in.get(), d_out.get(), d_mid.get(), in.width,
+           in.height, in.channels);
     t.kernel_ms = timer.stop();
     CUDA_CHECK_KERNEL();
 
@@ -326,6 +342,89 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
     t.download_ms = timer.stop();
 
     return t;
+}
+
+void benchmark_convolution(const Image& in, const ConvKernel& kernel, const Options& opt) {
+    const bool fits = tiling_fits(opt, kernel.radius, in.channels);
+
+    DeviceBuffer<uint8_t> d_in(in.byte_size());
+    DeviceBuffer<uint8_t> d_out(in.byte_size());
+    DeviceBuffer<float> d_mid(in.pixel_count() * static_cast<size_t>(in.channels));
+
+    d_in.upload(in.data.data(), in.byte_size());
+    upload_kernel(kernel);
+
+    const dim3 block(opt.block_x, opt.block_y);
+    const dim3 grid(ceil_div(in.width, static_cast<int>(block.x)),
+                    ceil_div(in.height, static_cast<int>(block.y)));
+
+    std::printf("\nbenchmark  %s, %s, block %dx%d, %d iterations\n", in.describe().c_str(),
+                kernel.describe().c_str(), opt.block_x, opt.block_y, opt.bench);
+    std::printf("           tile for radius %d needs %zu KiB of shared memory (%s)\n",
+                kernel.radius, tile_bytes(opt.block_x, opt.block_y, kernel.radius, in.channels) / 1024,
+                fits ? "fits" : "does not fit, tiled path skipped");
+
+    std::printf("\n%-12s %10s %10s %12s %10s\n", "method", "ms/iter", "Mpixel/s", "GB/s eff.",
+                "vs naive");
+    std::printf("%-12s %10s %10s %12s %10s\n", "------", "-------", "--------", "---------",
+                "--------");
+
+    const ConvMethod methods[] = {ConvMethod::Naive, ConvMethod::Tiled, ConvMethod::Separable};
+    float naive_ms = 0.0f;
+
+    for (ConvMethod method : methods) {
+        if (method == ConvMethod::Tiled && !fits) continue;
+        if (method == ConvMethod::Separable && !kernel.separable) continue;
+
+        // One untimed run first: the very first launch pays for module load
+        // and JIT, which would otherwise land entirely on the first method
+        // measured and make it look slow.
+        launch(method, grid, block, opt, kernel, d_in.get(), d_out.get(), d_mid.get(), in.width,
+               in.height, in.channels);
+        CUDA_CHECK_KERNEL();
+
+        GpuTimer timer;
+        timer.start();
+        for (int i = 0; i < opt.bench; ++i) {
+            launch(method, grid, block, opt, kernel, d_in.get(), d_out.get(), d_mid.get(),
+                   in.width, in.height, in.channels);
+        }
+        const float total_ms = timer.stop();
+        CUDA_CHECK_KERNEL();
+
+        const float ms = total_ms / static_cast<float>(opt.bench);
+        if (method == ConvMethod::Naive) naive_ms = ms;
+
+        const double seconds = static_cast<double>(ms) / 1000.0;
+        const double mpixels = static_cast<double>(in.pixel_count()) / 1.0e6 / seconds;
+
+        // "Effective" bandwidth: the traffic the algorithm actually needs,
+        // one read and one write per pixel, regardless of how many times the
+        // naive version re-reads the same byte. Comparing this against the
+        // device's theoretical peak from --list-devices is the honest measure
+        // of how close a kernel gets.
+        const double bytes = 2.0 * static_cast<double>(in.byte_size());
+        const double gbps = bytes / seconds / 1.0e9;
+
+        std::printf("%-12s %10.4f %10.1f %12.2f %9.2fx\n", method_name(method), ms, mpixels, gbps,
+                    naive_ms > 0.0f ? static_cast<double>(naive_ms / ms) : 1.0);
+    }
+
+    // One CPU pass for scale. Not iterated - at these sizes it is slow enough
+    // that one run is plenty and the number is only there for perspective.
+    Image cpu_out;
+    const auto cpu_start = std::chrono::steady_clock::now();
+    cpu::convolve(in, cpu_out, kernel);
+    const auto cpu_end = std::chrono::steady_clock::now();
+    const double cpu_ms =
+        std::chrono::duration<double, std::milli>(cpu_end - cpu_start).count();
+
+    std::printf("%-12s %10.4f %10.1f %12s %9.2fx\n", "cpu (1 run)", cpu_ms,
+                static_cast<double>(in.pixel_count()) / 1.0e6 / (cpu_ms / 1000.0), "-",
+                naive_ms > 0.0f ? cpu_ms / static_cast<double>(naive_ms) : 0.0);
+
+    std::printf("\nnote: kernel time only - the host<->device copies are excluded, and on a\n"
+                "      single small image they can easily cost more than the filter does.\n");
 }
 
 }  // namespace gpu

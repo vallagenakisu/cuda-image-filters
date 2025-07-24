@@ -62,6 +62,22 @@ int main(int argc, char** argv) {
         if (!opt.quiet) std::printf("cpu     reference backend\n");
     } else {
         cif::require_cuda_device();
+
+        if (opt.bench > 0) {
+            // Benchmarking compares convolution implementations, so it only
+            // means something for a filter that is a convolution.
+            cif::ConvKernel kernel;
+            if (!cif::build_kernel(opt, kernel, error)) {
+                std::fprintf(stderr,
+                             "error: --bench compares convolution methods, and %s\n"
+                             "       (try --filter gaussian, box, sharpen or a --kernel file)\n",
+                             error.c_str());
+                return 3;
+            }
+            cif::gpu::benchmark_convolution(input, kernel, opt);
+            return 0;
+        }
+
         cif::Timings t;
         switch (opt.filter) {
             case cif::Filter::Grayscale:

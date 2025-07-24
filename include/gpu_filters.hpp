@@ -35,6 +35,10 @@ Timings convolve(const Image& in, Image& out, const ConvKernel& kernel, const Op
 // budget for a block. The host needs this to decide what Auto means.
 bool tiling_fits(const Options& opt, int radius, int channels);
 
+// Time every convolution method that is valid for this kernel and print a
+// comparison table. Measures kernel time only, excluding the PCIe copies.
+void benchmark_convolution(const Image& in, const ConvKernel& kernel, const Options& opt);
+
 // Gradient magnitude. Always writes a single-channel image.
 Timings sobel(const Image& in, Image& out, const Options& opt);
 
