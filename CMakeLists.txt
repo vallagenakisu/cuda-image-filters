@@ -63,8 +63,15 @@ add_executable(test_kernels tests/test_kernels.cpp src/conv_kernel.cpp src/optio
 target_include_directories(test_kernels PRIVATE include)
 add_test(NAME kernels COMMAND test_kernels)
 
-# --- convenience -------------------------------------------------------------
+# --- sample image generator --------------------------------------------------
+# Small host-only tool that writes assets/sample.png, the test pattern the
+# README examples use.
+add_executable(make_sample scripts/make_sample.cpp src/image_io.cpp)
+target_include_directories(make_sample PRIVATE include)
+target_include_directories(make_sample SYSTEM PRIVATE third_party/stb)
+
 add_custom_target(sample
-  COMMAND cuda-filters --help
-  COMMENT "Build finished. Run ./cuda-filters --help for usage."
+  COMMAND make_sample "${CMAKE_SOURCE_DIR}/assets/sample.png" 1024 768
+  DEPENDS make_sample
+  COMMENT "Regenerating assets/sample.png"
 )

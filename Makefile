@@ -28,7 +28,7 @@ CUDA_SRC := src/cuda/device_info.cu src/cuda/grayscale.cu src/cuda/convolution.c
 HOST_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(HOST_SRC))
 CUDA_OBJ := $(patsubst %.cu,$(BUILD)/%.o,$(CUDA_SRC))
 
-.PHONY: all test clean
+.PHONY: all test sample demo clean
 
 all: $(BIN)
 
@@ -51,6 +51,18 @@ test: $(BUILD)/test_kernels
 $(BUILD)/test_kernels: tests/test_kernels.cpp src/conv_kernel.cpp src/options.cpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# Regenerate the test pattern in assets/.
+sample: $(BUILD)/make_sample
+	./$(BUILD)/make_sample assets/sample.png 1024 768
+
+$(BUILD)/make_sample: scripts/make_sample.cpp src/image_io.cpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# Render every filter into out/.
+demo: $(BIN)
+	./scripts/demo.sh
 
 clean:
 	rm -rf $(BUILD) $(BIN)

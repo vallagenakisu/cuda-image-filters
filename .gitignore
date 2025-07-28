@@ -13,6 +13,8 @@ results/
 *.ppm
 assets/*.png
 !assets/.gitkeep
+# the generated test pattern is committed so a fresh clone can run the examples
+!assets/sample.png
 
 # Editors & OS
 .vscode/
