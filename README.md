@@ -95,6 +95,35 @@ make CUDA_ARCH=75                                 # RTX 20-series / GTX 16-serie
 | RTX 40-series (Ada) | 89 |
 | RTX 50-series (Blackwell) | 120 |
 
+## The UI
+
+There is a small web UI for trying filters without retyping commands: load an
+image, pick a filter or type your own convolution matrix, see the result and
+the kernel timings side by side.
+
+```bash
+make ui                      # or: python3 gui/server.py
+```
+
+It opens <http://127.0.0.1:8765>. Standard library Python only — nothing to
+`pip install`, and it works the same on Linux, Windows and macOS. It shells
+out to the same `cuda-filters` binary, so what you see is the real GPU path.
+
+![the UI](docs/ui.png)
+
+What it gives you over the CLI:
+
+- drag and drop an image, or use the bundled sample
+- a live matrix editor with validation as you type, preloaded from
+  `kernels/*.kernel`, and a button to save your own back into `kernels/`
+- backend, `--method` and block size as controls, so you can watch tiled vs
+  naive vs separable on your own image
+- kernel/upload/download timings after every run, and `--verify` as a checkbox
+- `--bench` from a button
+
+It binds to `127.0.0.1` only. It runs a local binary with arguments from the
+page, so do not expose it to a network.
+
 ## First run
 
 ```bash
@@ -226,7 +255,7 @@ and the reference call the same inline helpers in
 Full pass, host tests plus 18 GPU-vs-reference cases:
 
 ```bash
-make test              # host-only unit tests, no GPU needed
+make test              # host-only unit tests (C++ and python), no GPU needed
 ./tests/run_tests.sh   # everything, skips stage 2 if there is no device
 ```
 
@@ -237,6 +266,7 @@ include/          headers; cuda_utils.cuh is the CUDA-specific one
 src/              host code: CLI, image I/O, kernel matrices, CPU reference
 src/cuda/         the kernels
 kernels/          custom convolution matrices
+gui/              local web UI (stdlib python, no dependencies)
 scripts/          sample image generator, demo renderer
 tests/            unit tests and the full test runner
 docs/             notes on the optimisation work
@@ -275,7 +305,11 @@ large for the kernel's register use. Try `--block 16x16` or `--block 8x8`.
 outweighs what tiling saves, or a debug build. Make sure you configured with
 `-DCMAKE_BUILD_TYPE=Release`.
 
-**No GPU at all** — everything still works on the CPU:
+**The UI says `cuda-filters not found`** — build the binary first, or point the
+server at it: `python3 gui/server.py --binary build/cuda-filters`.
+
+**No GPU at all** — everything still works on the CPU (the UI has a
+*CPU reference* toggle for this):
 
 ```bash
 ./cuda-filters -i photo.jpg -f gaussian -r 5 --backend cpu -o blur.png

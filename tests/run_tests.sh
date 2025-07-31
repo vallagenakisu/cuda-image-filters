@@ -27,6 +27,17 @@ else
   echo "  skip  $TESTBIN not built (cmake --build build --target test_kernels, or make test)"
 fi
 
+if command -v python3 > /dev/null 2>&1; then
+  if python3 tests/test_gui.py > "$TMP/gui.log" 2>&1; then
+    pass "gui logic ($(grep -c '^pass' "$TMP/gui.log") assertions)"
+  else
+    fail "gui logic"
+    cat "$TMP/gui.log"
+  fi
+else
+  echo "  skip  python3 not found, gui tests not run"
+fi
+
 echo
 echo "== stage 2: GPU vs CPU reference (needs a CUDA device) =="
 if [[ ! -x "$BIN" ]]; then

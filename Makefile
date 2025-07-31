@@ -8,6 +8,7 @@
 
 NVCC      ?= nvcc
 CXX       ?= g++
+PYTHON    ?= python3
 CUDA_ARCH ?= native
 
 BIN     := cuda-filters
@@ -28,7 +29,7 @@ CUDA_SRC := src/cuda/device_info.cu src/cuda/grayscale.cu src/cuda/convolution.c
 HOST_OBJ := $(patsubst %.cpp,$(BUILD)/%.o,$(HOST_SRC))
 CUDA_OBJ := $(patsubst %.cu,$(BUILD)/%.o,$(CUDA_SRC))
 
-.PHONY: all test sample demo clean
+.PHONY: all test sample demo ui clean
 
 all: $(BIN)
 
@@ -47,6 +48,7 @@ $(BUILD)/%.o: %.cu
 # The tests are host-only on purpose: they run on a machine with no GPU.
 test: $(BUILD)/test_kernels
 	./$(BUILD)/test_kernels
+	$(PYTHON) tests/test_gui.py
 
 $(BUILD)/test_kernels: tests/test_kernels.cpp src/conv_kernel.cpp src/options.cpp
 	@mkdir -p $(BUILD)
@@ -63,6 +65,10 @@ $(BUILD)/make_sample: scripts/make_sample.cpp src/image_io.cpp
 # Render every filter into out/.
 demo: $(BIN)
 	./scripts/demo.sh
+
+# Local web UI. Standard library only, so there is nothing to install.
+ui: $(BIN)
+	$(PYTHON) gui/server.py
 
 clean:
 	rm -rf $(BUILD) $(BIN)

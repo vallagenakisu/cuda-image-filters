@@ -2,6 +2,10 @@
 build/
 bin/
 obj/
+# the Makefile links the binary at the repo root
+/cuda-filters
+/cuda-filters.exe
+/make_sample
 *.o
 *.obj
 *.exe
@@ -15,6 +19,10 @@ assets/*.png
 !assets/.gitkeep
 # the generated test pattern is committed so a fresh clone can run the examples
 !assets/sample.png
+
+# Python
+__pycache__/
+*.pyc
 
 # Editors & OS
 .vscode/

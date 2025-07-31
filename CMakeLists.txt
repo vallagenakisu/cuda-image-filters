@@ -63,6 +63,23 @@ add_executable(test_kernels tests/test_kernels.cpp src/conv_kernel.cpp src/optio
 target_include_directories(test_kernels PRIVATE include)
 add_test(NAME kernels COMMAND test_kernels)
 
+# The GUI's argument construction and kernel validation, tested without a
+# server or a GPU. Skipped silently when python is not installed.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME gui COMMAND Python3::Interpreter
+           "${CMAKE_SOURCE_DIR}/tests/test_gui.py")
+
+  # cmake --build build --target ui
+  add_custom_target(ui
+    COMMAND Python3::Interpreter "${CMAKE_SOURCE_DIR}/gui/server.py"
+            --binary "$<TARGET_FILE:cuda-filters>"
+    DEPENDS cuda-filters
+    USES_TERMINAL
+    COMMENT "Starting the local UI on http://127.0.0.1:8765"
+  )
+endif()
+
 # --- sample image generator --------------------------------------------------
 # Small host-only tool that writes assets/sample.png, the test pattern the
 # README examples use.

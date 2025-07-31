@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CUDA Image Filters</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel-2: #1c232d; --line: #2a3441;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4493f8; --accent-dim: #1f6feb;
+    --good: #3fb950; --bad: #f85149; --warn: #d29922;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f8fa; --panel: #ffffff; --panel-2: #f0f3f6; --line: #d5dce3;
+      --text: #1f2328; --muted: #59636e; --accent: #0969da; --accent-dim: #0969da;
+      --good: #1a7f37; --bad: #cf222e; --warn: #9a6700;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+  header .spacer { flex: 1; }
+  .pill {
+    font: 11px var(--mono); padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); background: var(--panel-2);
+    max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pill.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+
+  main { display: grid; grid-template-columns: 300px 1fr; gap: 0; align-items: start; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+
+  aside {
+    padding: 16px; border-right: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  }
+  @media (max-width: 860px) { aside { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); } }
+
+  .group { margin-bottom: 18px; }
+  .group > label.title {
+    display: block; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .6px; color: var(--muted); margin-bottom: 7px; font-weight: 600;
+  }
+  select, input[type=text], input[type=number], textarea, button {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%;
+  }
+  textarea { font: 12.5px/1.45 var(--mono); resize: vertical; min-height: 130px; white-space: pre; }
+  select:focus, input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { cursor: pointer; background: var(--panel-2); }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary {
+    background: var(--accent-dim); border-color: var(--accent-dim);
+    color: #fff; font-weight: 600; padding: 10px;
+  }
+  button.primary:hover:not(:disabled) { filter: brightness(1.12); }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+
+  .slider { display: grid; grid-template-columns: 1fr 62px; gap: 8px; align-items: center; }
+  .slider input[type=range] { width: 100%; accent-color: var(--accent); padding: 0; }
+  .param-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    border: 0; border-radius: 0; padding: 6px 4px; font-size: 12.5px;
+    background: var(--panel-2); color: var(--muted);
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--accent-dim); color: #fff; font-weight: 600; }
+
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .check input { width: auto; accent-color: var(--accent); }
+
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .hint.ok { color: var(--good); }
+  .hint.bad { color: var(--bad); }
+
+  section.canvas { padding: 16px; min-width: 0; }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 700px) { .panes { grid-template-columns: 1fr; } }
+  .pane { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+  .pane h2 {
+    margin: 0; padding: 9px 12px; font-size: 12px; font-weight: 600; color: var(--muted);
+    border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 8px;
+  }
+  .pane h2 span { font: 11px var(--mono); font-weight: 400; }
+  .imgwrap {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 300px; padding: 10px;
+    background-image:
+      linear-gradient(45deg, rgba(128,128,128,.10) 25%, transparent 25%, transparent 75%, rgba(128,128,128,.10) 75%),
+      linear-gradient(45deg, rgba(128,128,128,.10) 25%, transparent 25%, transparent 75%, rgba(128,128,128,.10) 75%);
+    background-size: 18px 18px; background-position: 0 0, 9px 9px;
+  }
+  .imgwrap img { max-width: 100%; max-height: 62vh; display: block; border-radius: 4px; }
+  .imgwrap.drop { outline: 2px dashed var(--accent); outline-offset: -8px; }
+  .placeholder { color: var(--muted); font-size: 13px; text-align: center; padding: 30px 16px; }
+
+  .stats { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .stat {
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px;
+    background: var(--panel); min-width: 96px;
+  }
+  .stat b { display: block; font: 15px var(--mono); }
+  .stat small { color: var(--muted); font-size: 11px; }
+
+  pre.console {
+    margin: 14px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); font: 12px/1.5 var(--mono); color: var(--muted);
+    max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  pre.console .err { color: var(--bad); }
+  .busy { opacity: .55; pointer-events: none; }
+  .spin {
+    display: inline-block; width: 11px; height: 11px; border: 2px solid currentColor;
+    border-right-color: transparent; border-radius: 50%; animation: s .7s linear infinite;
+    vertical-align: -1px; margin-right: 6px;
+  }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CUDA Image Filters</h1>
+  <span id="binpill" class="pill">locating binary…</span>
+  <span class="spacer"></span>
+  <button id="devbtn" style="width:auto">GPU info</button>
+</header>
+
+<main>
+  <aside>
+    <div class="group">
+      <label class="title" for="file">Image</label>
+      <input type="file" id="file" accept="image/*,.bmp,.tga,.ppm,.pgm" style="display:none">
+      <div class="row">
+        <button onclick="document.getElementById('file').click()">Open…</button>
+        <button id="samplebtn">Sample</button>
+      </div>
+      <div class="hint" id="imghint">or drop an image on the left pane</div>
+    </div>
+
+    <div class="group">
+      <label class="title" for="filter">Filter</label>
+      <select id="filter">
+        <optgroup label="Pointwise">
+          <option value="grayscale">Grayscale</option>
+          <option value="invert">Invert</option>
+          <option value="tonemap">Tone map (Reinhard)</option>
+        </optgroup>
+        <optgroup label="Convolution">
+          <option value="gaussian" selected>Gaussian blur</option>
+          <option value="box">Box blur</option>
+          <option value="sharpen">Sharpen (unsharp mask)</option>
+          <option value="emboss">Emboss</option>
+          <option value="laplacian">Laplacian</option>
+        </optgroup>
+        <optgroup label="Edges">
+          <option value="sobel">Sobel</option>
+        </optgroup>
+        <optgroup label="Your own">
+          <option value="custom">Custom kernel…</option>
+        </optgroup>
+      </select>
+    </div>
+
+    <div class="group" id="params"></div>
+
+    <div class="group" id="kernelgroup" hidden>
+      <label class="title" for="preset">Convolution matrix</label>
+      <select id="preset"><option value="">Load a preset…</option></select>
+      <textarea id="kernel" spellcheck="false" style="margin-top:8px"></textarea>
+      <div class="hint" id="kernelhint">&nbsp;</div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="kname" placeholder="name" style="flex:1.3">
+        <button id="savekernel" style="flex:1">Save to kernels/</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <label class="title">Backend</label>
+      <div class="seg" id="backend">
+        <button data-v="cuda" aria-pressed="true">GPU (CUDA)</button>
+        <button data-v="cpu" aria-pressed="false">CPU reference</button>
+      </div>
+    </div>
+
+    <div class="group" id="methodgroup">
+      <label class="title" for="method">Convolution method</label>
+      <select id="method">
+        <option value="auto" selected>auto — best available</option>
+        <option value="naive">naive — global memory</option>
+        <option value="tiled">tiled — shared memory + halo</option>
+        <option value="separable">separable — two 1D passes</option>
+      </select>
+      <div class="param-label"><span>Block size</span></div>
+      <select id="block">
+        <option>8x8</option><option selected>16x16</option>
+        <option>32x8</option><option>32x32</option>
+      </select>
+    </div>
+
+    <div class="group">
+      <label class="check"><input type="checkbox" id="verify"> Verify against CPU reference</label>
+    </div>
+
+    <div class="group">
+      <button class="primary" id="apply">Apply filter</button>
+      <div class="row" style="margin-top:8px">
+        <button id="benchbtn" style="flex:1.4">Benchmark</button>
+        <input type="number" id="benchn" value="100" min="1" max="10000" style="flex:1" title="iterations">
+      </div>
+      <button id="savebtn" style="margin-top:8px" disabled>Download result</button>
+    </div>
+  </aside>
+
+  <section class="canvas">
+    <div class="panes">
+      <div class="pane">
+        <h2>Original <span id="origmeta"></span></h2>
+        <div class="imgwrap" id="origwrap">
+          <div class="placeholder">Drop an image here,<br>or use <b>Open…</b> / <b>Sample</b></div>
+        </div>
+      </div>
+      <div class="pane">
+        <h2>Result <span id="resmeta"></span></h2>
+        <div class="imgwrap" id="reswrap">
+          <div class="placeholder">Pick a filter and press <b>Apply</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stats" id="stats" hidden></div>
+    <pre class="console" id="console">Ready.</pre>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+let STATE = null, hasImage = false, lastOutput = null, busy = false;
+
+const PARAM_DEFS = {
+  radius:   { label: "Radius",   min: 0,   max: 24,  step: 1,    def: 3,   note: n => `kernel ${2*n+1}×${2*n+1}` },
+  sigma:    { label: "Sigma",    min: 0,   max: 12,  step: 0.1,  def: 0,   note: n => n == 0 ? "auto (radius/3)" : "" },
+  amount:   { label: "Amount",   min: 0,   max: 4,   step: 0.05, def: 1.0, note: () => "" },
+  exposure: { label: "Exposure", min: 0.1, max: 8,   step: 0.1,  def: 1.5, note: () => "" },
+  white:    { label: "White pt", min: 0.5, max: 12,  step: 0.1,  def: 4.0, note: () => "" },
+  gamma:    { label: "Gamma",    min: 1.0, max: 3.0, step: 0.05, def: 2.2, note: () => "" },
+};
+const paramValues = {};
+for (const [k, d] of Object.entries(PARAM_DEFS)) paramValues[k] = d.def;
+
+function log(text, isError) {
+  const el = $("console");
+  el.innerHTML = "";
+  const span = document.createElement("span");
+  if (isError) span.className = "err";
+  span.textContent = text;
+  el.appendChild(span);
+  el.scrollTop = 0;
+}
+
+function setBusy(on, label) {
+  busy = on;
+  document.querySelector("aside").classList.toggle("busy", on);
+  $("apply").innerHTML = on ? `<span class="spin"></span>${label || "Working…"}` : "Apply filter";
+}
+
+// ---- parameter controls, rebuilt whenever the filter changes ----
+function renderParams() {
+  const filter = $("filter").value;
+  const names = (STATE && STATE.filter_params[filter]) || [];
+  const box = $("params");
+  box.innerHTML = "";
+  $("kernelgroup").hidden = filter !== "custom";
+
+  // --method only applies to a GPU convolution.
+  const pointwise = (STATE ? STATE.pointwise : []).includes(filter);
+  $("methodgroup").style.opacity = (pointwise || currentBackend() === "cpu") ? .45 : 1;
+  $("method").disabled = pointwise || currentBackend() === "cpu";
+
+  if (!names.length) return;
+  const title = document.createElement("label");
+  title.className = "title";
+  title.textContent = "Parameters";
+  box.appendChild(title);
+
+  for (const name of names) {
+    const d = PARAM_DEFS[name];
+    const lbl = document.createElement("div");
+    lbl.className = "param-label";
+    const note = document.createElement("span");
+    note.id = `note-${name}`;
+    lbl.innerHTML = `<span>${d.label}</span>`;
+    lbl.appendChild(note);
+    box.appendChild(lbl);
+
+    const wrap = document.createElement("div");
+    wrap.className = "slider";
+    const range = document.createElement("input");
+    range.type = "range"; range.min = d.min; range.max = d.max; range.step = d.step;
+    range.value = paramValues[name];
+    const num = document.createElement("input");
+    num.type = "number"; num.min = d.min; num.max = d.max; num.step = d.step;
+    num.value = paramValues[name];
+
+    const sync = v => {
+      v = Math.min(d.max, Math.max(d.min, Number(v)));
+      paramValues[name] = v;
+      range.value = v; num.value = v;
+      note.textContent = d.note(v);
+    };
+    range.oninput = () => sync(range.value);
+    num.oninput = () => sync(num.value);
+    sync(paramValues[name]);
+
+    wrap.appendChild(range); wrap.appendChild(num);
+    box.appendChild(wrap);
+  }
+}
+
+function currentBackend() {
+  const on = document.querySelector("#backend button[aria-pressed='true']");
+  return on ? on.dataset.v : "cuda";
+}
+
+// ---- image loading ----
+async function upload(file) {
+  setBusy(true, "Loading…");
+  try {
+    const buf = await file.arrayBuffer();
+    const r = await fetch("/api/upload", {
+      method: "POST", headers: { "X-Filename": file.name }, body: buf,
+    });
+    const j = await r.json();
+    if (!j.ok) { log("Could not load image:\n" + j.error, true); return; }
+    showOriginal(j.preview, file.name);
+  } catch (e) {
+    log("Upload failed: " + e, true);
+  } finally { setBusy(false); }
+}
+
+function showOriginal(url, name) {
+  const wrap = $("origwrap");
+  wrap.innerHTML = "";
+  const img = new Image();
+  img.onload = () => { $("origmeta").textContent = `${img.naturalWidth}×${img.naturalHeight}`; };
+  img.src = url + "?t=" + Date.now();
+  wrap.appendChild(img);
+  hasImage = true;
+  $("imghint").textContent = name;
+  log("Loaded " + name + ". Press Apply.");
+}
+
+// ---- kernel editor ----
+let validateTimer = null;
+function scheduleValidate() {
+  clearTimeout(validateTimer);
+  validateTimer = setTimeout(validateKernel, 180);
+}
+async function validateKernel() {
+  const text = $("kernel").value;
+  const hint = $("kernelhint");
+  if (!text.trim()) { hint.className = "hint"; hint.textContent = " "; return; }
+  try {
+    const r = await fetch("/api/validate-kernel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      const i = j.info;
+      hint.className = "hint ok";
+      hint.textContent = `${i.side}×${i.side}, radius ${i.radius}, sum ${i.sum}`
+        + (i.bias ? `, bias ${i.bias}` : "") + (i.normalize ? ", normalized" : "");
+    } else {
+      hint.className = "hint bad";
+      hint.textContent = j.message;
+    }
+  } catch (e) { /* leave the previous hint in place */ }
+}
+
+// ---- running ----
+function buildRequest(extra) {
+  return Object.assign({
+    filter: $("filter").value,
+    kernel_text: $("kernel").value,
+    backend: currentBackend(),
+    method: $("method").value,
+    block: $("block").value,
+    verify: $("verify").checked,
+    radius: paramValues.radius,
+    sigma: paramValues.sigma,
+    amount: paramValues.amount,
+    exposure: paramValues.exposure,
+    white: paramValues.white,
+    gamma: paramValues.gamma,
+  }, extra || {});
+}
+
+async function run(extra, label) {
+  if (busy) return;
+  if (!hasImage) { log("Load an image first.", true); return; }
+  setBusy(true, label);
+  $("stats").hidden = true;
+  try {
+    const r = await fetch("/api/apply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildRequest(extra)),
+    });
+    const j = await r.json();
+    const head = "$ " + (j.command || "") + "\n\n";
+
+    if (!j.ok) {
+      log(head + (j.stdout || "") + (j.stderr || j.error || ""), true);
+      return;
+    }
+    log(head + (j.stdout || "").trim() + (j.stderr ? "\n" + j.stderr.trim() : ""));
+
+    if (j.output) showResult(j.output);
+    showStats(j.info);
+  } catch (e) {
+    log("Request failed: " + e, true);
+  } finally { setBusy(false); }
+}
+
+function showResult(url) {
+  const wrap = $("reswrap");
+  wrap.innerHTML = "";
+  const img = new Image();
+  img.onload = () => { $("resmeta").textContent = `${img.naturalWidth}×${img.naturalHeight}`; };
+  img.src = url + "?t=" + Date.now();
+  wrap.appendChild(img);
+  lastOutput = url;
+  $("savebtn").disabled = false;
+}
+
+function showStats(info) {
+  const box = $("stats");
+  box.innerHTML = "";
+  if (!info) { box.hidden = true; return; }
+  const add = (value, label) => {
+    const d = document.createElement("div");
+    d.className = "stat";
+    d.innerHTML = `<b></b><small></small>`;
+    d.querySelector("b").textContent = value;
+    d.querySelector("small").textContent = label;
+    box.appendChild(d);
+  };
+  const t = info.timings;
+  if (t) {
+    add(t.kernel_ms.toFixed(3) + " ms", "kernel");
+    add(t.upload_ms.toFixed(3) + " ms", "upload");
+    add(t.download_ms.toFixed(3) + " ms", "download");
+    add(t.method, "method");
+  }
+  if (info.verify) add(info.verify.startsWith("exact") ? "exact" : info.verify.split(":")[0], "verify");
+  box.hidden = box.children.length === 0;
+}
+
+// ---- wiring ----
+$("file").onchange = e => { if (e.target.files[0]) upload(e.target.files[0]); };
+$("samplebtn").onclick = async () => {
+  setBusy(true, "Loading…");
+  try {
+    const j = await (await fetch("/api/use-sample", { method: "POST" })).json();
+    if (!j.ok) log(j.error, true); else showOriginal(j.preview, "sample.png");
+  } finally { setBusy(false); }
+};
+
+const ow = $("origwrap");
+["dragenter", "dragover"].forEach(ev => ow.addEventListener(ev, e => {
+  e.preventDefault(); ow.classList.add("drop");
+}));
+["dragleave", "drop"].forEach(ev => ow.addEventListener(ev, e => {
+  e.preventDefault(); ow.classList.remove("drop");
+}));
+ow.addEventListener("drop", e => { if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); });
+
+$("filter").onchange = renderParams;
+$("kernel").oninput = scheduleValidate;
+document.querySelectorAll("#backend button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#backend button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  renderParams();
+});
+
+$("preset").onchange = e => {
+  const p = (STATE.presets || []).find(x => x.name === e.target.value);
+  if (p) { $("kernel").value = p.text; $("kname").value = p.name; validateKernel(); }
+};
+
+$("apply").onclick = () => run(null, "Filtering…");
+$("benchbtn").onclick = () => {
+  const n = Math.max(1, Number($("benchn").value) || 100);
+  if (currentBackend() === "cpu") { log("Benchmark compares GPU methods — switch the backend to CUDA.", true); return; }
+  run({ bench: n, verify: false }, "Benchmarking…");
+};
+$("savebtn").onclick = () => {
+  if (!lastOutput) return;
+  const a = document.createElement("a");
+  a.href = lastOutput; a.download = "filtered.png"; a.click();
+};
+$("savekernel").onclick = async () => {
+  const j = await (await fetch("/api/save-kernel", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: $("kname").value, text: $("kernel").value }),
+  })).json();
+  log(j.ok ? "Saved " + j.path : "Could not save: " + j.error, !j.ok);
+  if (j.ok) refreshState();
+};
+$("devbtn").onclick = async () => {
+  setBusy(true, "Querying…");
+  try {
+    const j = await (await fetch("/api/devices")).json();
+    log(j.output || "no output", !j.ok);
+  } finally { setBusy(false); }
+};
+
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); $("apply").click(); }
+});
+
+async function refreshState() {
+  STATE = await (await fetch("/api/state")).json();
+  const pill = $("binpill");
+  if (STATE.binary) {
+    pill.className = "pill ok";
+    pill.textContent = STATE.binary;
+  } else {
+    pill.className = "pill bad";
+    pill.textContent = "cuda-filters not found — build it first";
+  }
+  const sel = $("preset");
+  sel.innerHTML = '<option value="">Load a preset…</option>';
+  for (const p of STATE.presets || []) {
+    const o = document.createElement("option");
+    o.value = p.name; o.textContent = p.name;
+    sel.appendChild(o);
+  }
+  if (!$("kernel").value && STATE.presets && STATE.presets.length) {
+    const outline = STATE.presets.find(p => p.name === "outline") || STATE.presets[0];
+    $("kernel").value = outline.text;
+    $("kname").value = outline.name;
+  }
+  // A reload should not throw away the image you already loaded - the server
+  // still has it, so put it back.
+  if (STATE.preview && !hasImage) showOriginal(STATE.preview, STATE.input_name || "image");
+  if (STATE.last_output && !lastOutput) showResult(STATE.last_output);
+
+  renderParams();
+  validateKernel();
+}
+
+refreshState();
+</script>
+</body>
+</html>
